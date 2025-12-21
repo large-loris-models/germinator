@@ -65,6 +65,68 @@ germinator/
 
 See [docs/adding-targets.md](docs/adding-targets.md) for details.
 
+
+
+## Bugs Found
+
+### Project: LLVM MLIR
+| Type | Description |
+| :--- | :--- |
+| **Memory Safety** | Heap buffer overflow in GPU dialect via negative workgroup attributions |
+| **Memory Safety** | Memory leak in SPIR-V to LLVM conversion |
+| **Stack Overflow** | Recursion in dialect conversion with circular SSA dependencies |
+| **Segfault** | Null pointer dereference in Shape dialect library verification |
+| **Crash** | `emitc.for` verification crash on missing block arguments |
+| **Crash** | `irdl.type` verification crash on empty symbol name |
+| **Crash** | `tosa.concat` verification crash accessing OOB dimension index |
+| **Crash** | `memref.alloc` crash on zero-result operation |
+| **Crash** | Test dialect verification crash on dynamic shapes |
+| **Crash** | `tosa.table` verification crash on unranked tensor result type |
+| **Crash** | SCF to SPIR-V conversion crash on zero-sized memref |
+| **Crash** | Transform dialect crash on array bounds in `transform.include` |
+| **Crash** | Parser crash on mixed string/integer literals in dense tensor |
+| **Crash** | CallGraph crash on `func.call` with nested regions |
+| **Crash** | `tosa.if` crash when region lacks terminator |
+| **Crash** | Transform dialect crash when applied to non-function operations |
+| **Assertion** | Failure in `scf.for` verification with malformed region args |
+| **Assertion** | Failure in IRDL verification with self-referencing types |
+
+### Project: Triton
+| Type | Description |
+| :--- | :--- |
+| **Memory Safety** | Heap corruption in `tt.expand_dims` during error recovery |
+| **Memory Safety** | Heap corruption in `ReduceOp` shape inference |
+| **Crash** | Crash in AMDGPU to LLVM conversion when tensor lacks encoding |
+
+### Project: CIRCT
+| Type | Description |
+| :--- | :--- |
+| **Segfault** | Segmentation fault in Handshake buffer insertion |
+| **Segfault** | Segmentation fault in loop schedule pipeline verifier |
+| **Memory Leak** | Memory leak in HW to SystemC conversion |
+| **Logic Error** | Folding rollback error during HW to LLVM conversion |
+| **Assertion** | Failure in InstanceGraph analysis |
+| **Assertion** | Failure in DenseArrayAttr parser |
+| **Assertion** | Failure in Arc function splitting |
+| **Assertion** | Failure in DeadCodeAnalysis during FSM range narrowing |
+| **Assertion** | Failure when printing external modules with mismatched ports |
+
+### Project: HEIR
+| Type | Description |
+| :--- | :--- |
+| **Memory Safety** | Stack-use-after-return in `CaptureAmbientScope` |
+| **Memory Safety** | Stack-use-after-scope in LWE Verification |
+| **Memory Safety** | Heap-use-after-free during dialect conversion |
+| **Logic Error** | Replacement value count mismatch in secret generic conversion |
+| **Logic Error** | Invalid type cast in Arith to Mod Arith conversion |
+| **Legalization** | Failure for `mgmt.modreduce` in secret generic conversion |
+| **Legalization** | Failure in CGGI Quart conversion |
+| **Assertion** | Use-list failure during secret to mod arith conversion |
+| **Assertion** | Bitwidth mismatch in CGGI materialization |
+| **Assertion** | Failure in `tensor.empty` via ElementwiseToAffine |
+| **Assertion** | Failure with nested multi-result ops in `secret.generic` |
+| **Assertion** | Failure in `secret.generic` verifier on operand count mismatch |
+
 ## License
 
 MIT
