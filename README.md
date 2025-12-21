@@ -12,7 +12,7 @@ Germinator combines grammar-based fuzzing with parameterized mutation synthesis 
 
 ## Supported Targets
 
-- **MLIR** (all dialects)
+- **MLIR**
 - **LLVM IR** (planned)
 - **WebAssembly** (planned)
 
