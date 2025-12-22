@@ -127,6 +127,17 @@ See [docs/adding-targets.md](docs/adding-targets.md) for details.
 | **Assertion** | Failure with nested multi-result ops in `secret.generic` |
 | **Assertion** | Failure in `secret.generic` verifier on operand count mismatch |
 
+### Project: Torch MLIR
+
+| Type | Description |
+| --- | --- |
+| **Assertion** | Failure in `SymbolTable` due to duplicate symbol names in global slots |
+| **Assertion** | Incompatible type cast in global slot initializer due to integer attribute |
+| **Assertion** | Failure in `Block::getTerminator` for missing initializer terminators |
+| **Assertion** | Unexpected terminator type cast failure in global slot initializer |
+| **Assertion** | Invariant failure in `ValueTensorType` during type inference from signless i64 |
+
+
 ## License
 
 MIT
