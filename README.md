@@ -137,6 +137,27 @@ See [docs/adding-targets.md](docs/adding-targets.md) for details.
 | **Assertion** | Unexpected terminator type cast failure in global slot initializer |
 | **Assertion** | Invariant failure in `ValueTensorType` during type inference from signless i64 |
 
+### Project: IREE
+
+| Type | Description |
+| --- | --- |
+| **Assertion** | Failure in DemoteF64ToF32 pass when encountering `llvm.func` operations |
+| **Segfault** | Segmentation fault in the ConvertToStream pass during utility list type conversion |
+| **Assertion** | Failure in function printer due to invalid tied operand index |
+| **Memory Leak** | Memory leak in HAL conversion during Stream command execution legalization |
+| **Memory Safety** | Memory corruption in LiftCFGToSCF pass when processing empty function regions |
+| **Assertion** | Failure in Stream dialect conversion when `flow.executable.export` has results |
+| **Assertion** | Failure in DialectConversion during StableHLO to IREE input conversion with zero-extent tensors |
+| **Memory Safety** | Memory corruption in the ConvertToStream pass during operand type inspection |
+| **Assertion** | Failure in `Util::FuncOp` printer due to out-of-bounds `tied_operands` index |
+| **Assertion** | Failure in `FloatAttr::get` during constant folding of `vm.cast.ui64.f64` |
+| **Assertion** | Failure in `MapScatterOp::verify` when region block is missing a terminator |
+| **Segfault** | Segfault in DialectConversion rollback during `ConvertBf16ToUInt16BuffersPass` |
+| **Assertion** | Failure in transform interpreter when encountering non-transform operation |
+| **Assertion** | Failure in `Stream::AsyncFuncOp::build` due to result attribute mismatch |
+| **Assertion** | Failure in `Stream::AsyncFuncOp::build` due to argument attribute mismatch |
+| **Crash** | `hal.device.queue.dealloca` verifier crashes when fence operand is a block argument |
+
 
 ## License
 
