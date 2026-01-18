@@ -67,7 +67,9 @@ See [docs/adding-targets.md](docs/adding-targets.md) for details.
 
 
 
-## Bugs Found
+## Bugs Found (Summary)
+
+[Full Bug Tracker](https://github.com/users/sairam2661/projects/1)
 
 ### Project: LLVM MLIR
 | Type | Description |
