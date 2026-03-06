@@ -1,5 +1,7 @@
 # Germinator
 
+(NOTE! TOOL IS WIP! ETA: MAR 20, 2026)
+
 An extensible grammar-based fuzzer for IR-family languages.
 
 ## Overview
