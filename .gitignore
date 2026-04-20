@@ -1,5 +1,12 @@
+# Build
+/build/
+cmake-build-*/
+
+
 deps/
-build/
+
+
+
 corpus/
 seeds/
 seeds_split/
