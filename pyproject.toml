@@ -1,0 +1,10 @@
+[project]
+name = "germinator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "antlr4-python3-runtime>=4.13,<4.14",
+    "antlr4-tools>=0.2.2",
+]
