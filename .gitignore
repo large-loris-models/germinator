@@ -1,5 +1,8 @@
-__pycache__/*
-.venv/*
+deps/
 build/
-tests/
-*.pyc
+corpus/
+seeds/
+seeds_split/
+third_party/
+*.log
+nohup.out
