@@ -44,7 +44,7 @@ export CT_OPT_ASAN="$CT_BUILD_ASAN/bin/cuda-tile-opt"
 
 export FUZZTEST_SRC="$PROJECT_ROOT/third_party/fuzztest"
 export CENTIPEDE_BIN="$FUZZTEST_SRC/bazel-bin/centipede/centipede"
-export CENTIPEDE_RUNNER="$FUZZTEST_SRC/bazel-bin/centipede/centipede_runner_no_main.a"
+export CENTIPEDE_RUNNER="$FUZZTEST_SRC/bazel-bin/centipede/libcentipede_runner_static.a"
 
 # ── Grammarinator ───────────────────────────────────────────────────────────
 
