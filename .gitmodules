@@ -1,0 +1,6 @@
+[submodule "third_party/fuzztest"]
+	path = third_party/fuzztest
+	url = https://github.com/sairam2661/fuzztest.git
+[submodule "third_party/grammarinator"]
+	path = third_party/grammarinator
+	url = https://github.com/sairam2661/grammarinator.git
