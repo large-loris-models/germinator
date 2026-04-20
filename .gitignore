@@ -2,14 +2,24 @@
 /build/
 cmake-build-*/
 
-
+# Installs
 deps/
 
+# Temp (Remove later)
+scripts/temp
 
-
+# Seeds
 corpus/
 seeds/
 seeds_split/
+
+# Submodules
 third_party/
+
+# Log files
 *.log
 nohup.out
+
+# Python
+.venv
+__pycache__
