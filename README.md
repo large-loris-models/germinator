@@ -1,168 +1,107 @@
 # Germinator
 
-(NOTE! TOOL IS WIP! ETA: APR 25, 2026)
+Coverage-guided fuzzer for the **cuda-tile** MLIR dialect, driven by
+[Centipede](https://github.com/google/fuzztest/tree/main/centipede) and
+triaged against an ASAN-instrumented build of `cuda-tile-opt`.
 
-An extensible grammar-based fuzzer for IR-family languages.
+## What this is
 
-## Overview
-
-Germinator combines grammar-based fuzzing with parameterized mutation synthesis to generate high-quality test cases for compiler intermediate representations (IRs). It builds on ideas from [SynthFuzz](https://arxiv.org/abs/2404.16947) and [Germinator](https://arxiv.org/abs/2512.05887), and extends them to support multiple IR families.
-
-## Features
-
-- TBD
-
-## Supported Targets
-
-- **MLIR**
-- **LLVM IR** (planned)
-- **WebAssembly** (planned)
-
-## Installation
-
-```bash
-# From PyPI (when published)
-pip install germinator
-
-# From source
-git clone https://github.com/large-loris-models/germinator
-cd germinator
-pip install -e .
-
-# With LLM support
-pip install -e ".[llm]"
-```
-
-## Quick Start
-
-```bash
-# Process a grammar
-germinator-process src/germinator/grammar/grammars/mlir.g4 -o build/ --rule start_rule 
-
-# Convert test cases to ASTs
-grammarinator-parse src/germinator/grammar/grammars/mlir.g4 -i {input/*.mlir} -o {trees} -r start_rule
-
-# Generate test cases
-germinator fuzz --family ssa.mlir --seeds trees --output tests -n 1000 --grammar build --no-keep-trees -j 10
-```
+`cuda-tile-opt` is the dialect driver for the cuda-tile MLIR dialect.
+Germinator feeds it mutated `.mlir` inputs under coverage instrumentation,
+and replays interesting inputs against a parallel ASAN/UBSAN build to
+surface memory safety and undefined behavior bugs.
 
 ## Architecture
 
 ```
-germinator/
-├── core/           # Domain-agnostic primitives
-├── families/       # Mutation strategies per domain (ssa/, etc.)
-├── seeds/          # Seed corpus management + LLM generation
-├── grammar/        # Grammar processing
-├── engine/         # Orchestration
-├── drivers/        # Test execution (pluggable)
-└── cli/            # Command-line interface
+            seeds/ ─┐
+                    ▼
+                  corpus/  ◀─────────────── Centipede
+                    │          (sancov cuda-tile-opt, N jobs)
+                    │
+                    ├──► ASAN oracle       (asan cuda-tile-opt, triage)
+                    └──► grammarinator     (planned, grammar-aware gen)
 ```
 
-## Adding a New Target
+Three LLVM/MLIR builds are produced, each installed under `deps/`:
 
-1. Add grammar file: `src/germinator/grammar/grammars/your_target.g4`
-2. Add family config: `src/germinator/families/ssa/your_target/config.toml`
-3. (Optional) Add driver: `src/germinator/drivers/your_target.py`
+| Build  | Purpose                         | Install prefix             |
+|--------|---------------------------------|----------------------------|
+| sancov | fuzz target coverage            | `deps/llvm-install-sancov` |
+| asan   | ASAN/UBSAN oracle               | `deps/llvm-install-asan`   |
+| plain  | `mlir-opt`, `llvm-symbolizer`   | `deps/llvm-install-plain`  |
 
-See [docs/adding-targets.md](docs/adding-targets.md) for details.
+cuda-tile is built twice — once against the sancov install (for fuzzing)
+and once against the asan install (for triage).
 
+## Quick start
 
+```sh
+# 1. One-time OS-level setup (apt, bazelisk).
+./scripts/build/bootstrap.sh
 
-## Bugs Found (Summary)
+# 2. Fetch submodules (fuzztest, grammarinator forks).
+git submodule update --init --recursive
 
-[Full Bug Tracker](https://github.com/users/sairam2661/projects/1)
+# 3. Build LLVM/MLIR (×3) and cuda-tile (×2). Takes a while.
+./scripts/build/setup_deps.sh
 
-### Project: LLVM MLIR
-| Type | Description |
-| :--- | :--- |
-| **Memory Safety** | Heap buffer overflow in GPU dialect via negative workgroup attributions |
-| **Memory Safety** | Memory leak in SPIR-V to LLVM conversion |
-| **Stack Overflow** | Recursion in dialect conversion with circular SSA dependencies |
-| **Segfault** | Null pointer dereference in Shape dialect library verification |
-| **Crash** | `emitc.for` verification crash on missing block arguments |
-| **Crash** | `irdl.type` verification crash on empty symbol name |
-| **Crash** | `tosa.concat` verification crash accessing OOB dimension index |
-| **Crash** | `memref.alloc` crash on zero-result operation |
-| **Crash** | Test dialect verification crash on dynamic shapes |
-| **Crash** | `tosa.table` verification crash on unranked tensor result type |
-| **Crash** | SCF to SPIR-V conversion crash on zero-sized memref |
-| **Crash** | Transform dialect crash on array bounds in `transform.include` |
-| **Crash** | Parser crash on mixed string/integer literals in dense tensor |
-| **Crash** | CallGraph crash on `func.call` with nested regions |
-| **Crash** | `tosa.if` crash when region lacks terminator |
-| **Crash** | Transform dialect crash when applied to non-function operations |
-| **Assertion** | Failure in `scf.for` verification with malformed region args |
-| **Assertion** | Failure in IRDL verification with self-referencing types |
+# 4. Build Centipede engine + runner from the fuzztest submodule.
+./scripts/build/build_centipede.sh
 
-### Project: Triton
-| Type | Description |
-| :--- | :--- |
-| **Memory Safety** | Heap corruption in `tt.expand_dims` during error recovery |
-| **Memory Safety** | Heap corruption in `ReduceOp` shape inference |
-| **Crash** | Crash in AMDGPU to LLVM conversion when tensor lacks encoding |
+# 5. Collect .mlir seeds from cuda-tile + upstream MLIR tests.
+./scripts/build/collect_seeds.sh
 
-### Project: CIRCT
-| Type | Description |
-| :--- | :--- |
-| **Segfault** | Segmentation fault in Handshake buffer insertion |
-| **Segfault** | Segmentation fault in loop schedule pipeline verifier |
-| **Memory Leak** | Memory leak in HW to SystemC conversion |
-| **Logic Error** | Folding rollback error during HW to LLVM conversion |
-| **Assertion** | Failure in InstanceGraph analysis |
-| **Assertion** | Failure in DenseArrayAttr parser |
-| **Assertion** | Failure in Arc function splitting |
-| **Assertion** | Failure in DeadCodeAnalysis during FSM range narrowing |
-| **Assertion** | Failure when printing external modules with mismatched ports |
+# 6. Link the fuzz harness binaries (currently a placeholder).
+./scripts/build/link_fuzz_target.sh
 
-### Project: HEIR
-| Type | Description |
-| :--- | :--- |
-| **Memory Safety** | Stack-use-after-return in `CaptureAmbientScope` |
-| **Memory Safety** | Stack-use-after-scope in LWE Verification |
-| **Memory Safety** | Heap-use-after-free during dialect conversion |
-| **Logic Error** | Replacement value count mismatch in secret generic conversion |
-| **Logic Error** | Invalid type cast in Arith to Mod Arith conversion |
-| **Legalization** | Failure for `mgmt.modreduce` in secret generic conversion |
-| **Legalization** | Failure in CGGI Quart conversion |
-| **Assertion** | Use-list failure during secret to mod arith conversion |
-| **Assertion** | Bitwidth mismatch in CGGI materialization |
-| **Assertion** | Failure in `tensor.empty` via ElementwiseToAffine |
-| **Assertion** | Failure with nested multi-result ops in `secret.generic` |
-| **Assertion** | Failure in `secret.generic` verifier on operand count mismatch |
+# 7. Start the pipeline (fuzzer + ASAN oracle).
+nohup ./scripts/run/start.sh > build/run.log 2>&1 &
 
-### Project: Torch MLIR
+# 8. Check progress.
+./scripts/analysis/status.sh
 
-| Type | Description |
-| --- | --- |
-| **Assertion** | Failure in `SymbolTable` due to duplicate symbol names in global slots |
-| **Assertion** | Incompatible type cast in global slot initializer due to integer attribute |
-| **Assertion** | Failure in `Block::getTerminator` for missing initializer terminators |
-| **Assertion** | Unexpected terminator type cast failure in global slot initializer |
-| **Assertion** | Invariant failure in `ValueTensorType` during type inference from signless i64 |
+# 9. Stop.
+./scripts/run/stop.sh
+```
 
-### Project: IREE
+## Layout
 
-| Type | Description |
-| --- | --- |
-| **Assertion** | Failure in DemoteF64ToF32 pass when encountering `llvm.func` operations |
-| **Segfault** | Segmentation fault in the ConvertToStream pass during utility list type conversion |
-| **Assertion** | Failure in function printer due to invalid tied operand index |
-| **Memory Leak** | Memory leak in HAL conversion during Stream command execution legalization |
-| **Memory Safety** | Memory corruption in LiftCFGToSCF pass when processing empty function regions |
-| **Assertion** | Failure in Stream dialect conversion when `flow.executable.export` has results |
-| **Assertion** | Failure in DialectConversion during StableHLO to IREE input conversion with zero-extent tensors |
-| **Memory Safety** | Memory corruption in the ConvertToStream pass during operand type inspection |
-| **Assertion** | Failure in `Util::FuncOp` printer due to out-of-bounds `tied_operands` index |
-| **Assertion** | Failure in `FloatAttr::get` during constant folding of `vm.cast.ui64.f64` |
-| **Assertion** | Failure in `MapScatterOp::verify` when region block is missing a terminator |
-| **Segfault** | Segfault in DialectConversion rollback during `ConvertBf16ToUInt16BuffersPass` |
-| **Assertion** | Failure in transform interpreter when encountering non-transform operation |
-| **Assertion** | Failure in `Stream::AsyncFuncOp::build` due to result attribute mismatch |
-| **Assertion** | Failure in `Stream::AsyncFuncOp::build` due to argument attribute mismatch |
-| **Crash** | `hal.device.queue.dealloca` verifier crashes when fence operand is a block argument |
+```
+scripts/
+├── build/
+│   ├── env.sh                   # All paths, flags, check_prereqs
+│   ├── bootstrap.sh             # OS packages (apt)
+│   ├── setup_deps.sh            # LLVM/MLIR ×3 + cuda-tile ×2
+│   ├── build_centipede.sh       # Centipede via Bazel
+│   ├── link_fuzz_target.sh      # (placeholder) fuzz harness linking
+│   ├── collect_seeds.sh         # .mlir seeds → seeds/
+│   └── setup_grammarinator.sh   # (placeholder) grammar-aware generator
+├── run/
+│   ├── start.sh                 # Fuzzer + ASAN oracle, core-pinned
+│   ├── stop.sh                  # Graceful shutdown
+│   └── run_tests.sh             # (placeholder) mutator tests
+├── oracles/
+│   ├── common.sh                # Sharding, inotify, result bookkeeping
+│   └── asan_opt.sh              # ASAN/UBSAN oracle for cuda-tile-opt
+└── analysis/
+    ├── status.sh                # Unified dashboard
+    └── unique_crashes.sh        # Crash dedup from run.log
 
+src/
+├── harness/                     # (empty) fuzz harnesses
+└── mutators/                    # (empty) structured mutators
 
-## License
+tests/                           # (empty) unit tests
+deps/                            # LLVM source/builds/installs, cuda-tile
+build/                           # Build outputs, workdirs, oracle results
+corpus/                          # Fuzzer corpus (lives across runs)
+seeds/                           # Raw .mlir seeds collected from tests
+third_party/
+├── fuzztest/                    # submodule (sairam2661 fork)
+└── grammarinator/               # submodule (sairam2661 fork)
+```
 
-MIT
+## Bugs found
+
+_TBD._
