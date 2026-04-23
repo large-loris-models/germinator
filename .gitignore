@@ -1,12 +1,10 @@
 # Build
 /build/
+build/
 cmake-build-*/
 
 # Installs
 deps/
-
-# Temp (Remove later)
-scripts/temp
 
 # Seeds
 corpus/
@@ -22,4 +20,5 @@ nohup.out
 
 # Python
 .venv
-__pycache__
+__pycache__/
+*.pyc

@@ -1,5 +1,8 @@
 grammar mlir;
 
+
+// === Entry rules ===
+
 start:
     mlir_file
 ;
@@ -8,12 +11,39 @@ mlir_file:
     definition_and_module_list+
 ;
 
+definition_and_module_list:
+    definition_list
+    | module_list
+    | definition_list module_list
+;
 
-// ---------------------------------------------------------------------- Structure of an MLIR
+// === Top-level definitions ===
+
 // parse-able string
-
 definition_list:
     definition+
+;
+
+definition:
+    type_alias_def
+    | attribute_alias_def
+;
+
+// top-level definitions
+
+// Definitions of affine maps/integer sets/aliases are at the top of the file.
+// The historical `'type'` literal made `type` an ANTLR-implicit keyword,
+// which blocked every attribute-dict entry whose key is literally `type`
+// (e.g. `{type = !emitc.array<1xf32>}`, common in EmitC / Cpp / SPIR-V /
+// OpenACC seeds — cluster `mismatched 'type'`).  Generic-form seeds in this
+// corpus don't use the `type` keyword at all, so the simpler equals-form
+// covers them without introducing the keyword.  (Q2)
+type_alias_def:
+    type_alias '=' mlir_type
+;
+
+attribute_alias_def:
+    attribute_alias '=' attribute_value
 ;
 
 // Top-level modules in generic form now routinely carry a property dict
@@ -25,71 +55,244 @@ module_list:
     (generic_module | operation)+
 ;
 
-definition_and_module_list:
-    definition_list
-    | module_list
-    | definition_list module_list
+// Definition
+generic_module:
+    string_literal '(' argument_list? ')' '(' region ')' attribute_dict? trailing_type
+        trailing_location?
 ;
 
+// === Operations ===
 
+// Final operation definition NOTE: 'pymlir_dialect_ops' is defined externally by pyMLIR
+// `generic_module` was one of the alternatives but it's a strict subset of
+// `generic_operation` (no prop_dict, fewer optional bits) — any op matching
+// `generic_module` also matches `generic_operation`. Keeping it created a
+// duplicate reach-path that ALL(*) had to disambiguate at every string-literal
+// op. Chief culprit of loop_split's slow parse (19 nested `"builtin.module"`).
+// generic_module is still used by top-level `module_list` unchanged.
+operation:
+    optional_op_result_list
+    (
+        custom_operation
+        | generic_operation
+    ) optional_trailing_loc
+;
 
-// Identifier syntax
-suffix_id:
-    DIGITS
+// Undefined operations in all dialects
+generic_operation:
+    string_literal '(' optional_ssa_use_list ')' optional_successor_list optional_prop_dict
+        optional_region_list optional_attr_dict trailing_type
+;
+
+custom_operation:
+    BARE_ID '.' BARE_ID optional_ssa_use_list trailing_type
+;
+
+// Operation results
+op_result:
+    ssa_id optional_int_literal
+;
+
+op_result_list:
+    op_result (',' op_result)* '='
+;
+
+// Types that appear after the operation, indicating return types
+trailing_type:
+    ':' function_type
+;
+
+trailing_location:
+    ('loc' '(' location ')')
+;
+
+// Trailing location (for debug information)
+location:
+    string_literal ':' decimal_literal ':' decimal_literal
+;
+
+// === Blocks and regions ===
+
+block_label:
+    block_id optional_block_arg_list ':'
+;
+
+// Generic-form printer emits empty block bodies like `^bb0:` followed by
+// nothing (when the entry block has block args but no ops), so allow a
+// labeled block with zero operations.
+block:
+    block_label operation*
+    | operation_list
+;
+
+successor_list:
+    '[' block_id? (',' block_id)* ']'
+;
+
+operation_list:
+    operation+
+;
+
+block_arg_list:
+    '(' optional_ssa_and_type_list ')'
+;
+
+// Block arguments
+ssa_id_and_type:
+    ssa_id ':' mlir_type
+;
+
+ssa_id_and_type_list:
+    ssa_id_and_type (',' ssa_id_and_type)*
+;
+
+region:
+    '{' block* '}'
+;
+
+region_list:
+    '(' region? (',' region)* ')'
+;
+
+// Arguments
+named_argument:
+    ssa_id ':' mlir_type optional_attr_dict
+;
+
+argument_list:
+    (named_argument ( ',' named_argument)*)
+    | (mlir_type optional_attr_dict (',' mlir_type optional_attr_dict)*)
+;
+
+// Return values
+function_result:
+    mlir_type optional_attr_dict
+;
+
+function_result_list_no_parens:
+    function_result (',' function_result)*
+;
+
+function_result_list_parens:
+    ('(' ')')
+    | ('(' function_result_list_no_parens ')')
+;
+
+function_result_list:
+    function_result_list_parens
+;
+
+// Body
+function_body:
+    region
+;
+
+// === Attributes ===
+
+// Simple attribute types
+array_attribute:
+    '[' (attribute_value ( ',' attribute_value)*)? ']'
+;
+
+bool_attribute:
+    bool_literal
+;
+
+dictionary_attribute:
+    '{' (attribute_entry ( ',' attribute_entry)*)? '}'
+;
+
+float_attribute:
+    (FLOAT_LITERAL optional_type)
+    | (HEXADECIMAL_LITERAL ':' mlir_type)
+;
+
+integer_attribute:
+    posneg_integer_literal optional_type
+;
+
+string_attribute:
+    string_literal optional_type
+;
+
+symbol_ref_attribute:
+    (symbol_ref_id ( '::' symbol_ref_id)*)
+;
+
+type_attribute:
+    mlir_type
+;
+
+// Standard attributes
+standard_attribute:
+    array_attribute
+    | bool_attribute
+    | dictionary_attribute
+    | float_attribute
+    | integer_attribute
+    | string_attribute
+    | symbol_ref_attribute
+    | type_attribute
+;
+
+dependent_attribute_entry:
+    BARE_ID '=' attribute_value
+;
+
+dialect_attribute_entry:
+    (BARE_ID '.' BARE_ID)
+    | (BARE_ID '.' BARE_ID '=' attribute_value)
+    | (string_literal '=' attribute_value)
+;
+
+// Dialect attributes
+dialect_attribute:
+    '#'? (opaque_dialect_item | pretty_dialect_item) (':' mlir_type)?
+;
+
+// `attribute_alias` (`#foo`) and `dialect_attribute` (`#foo.bar<body>`) share
+// the same `#BARE_ID(.BARE_ID)?` prefix; put the more expressive
+// `dialect_attribute` first so the common bodied form doesn't require a
+// backtracked retry. Same rationale as `non_function_type` above.
+attribute_value:
+    dialect_attribute
+    | attribute_alias
+    | loc_attribute
+    | standard_attribute
+;
+
+// Property dictionaries
+property_dict:
+    '<' attribute_dict '>'
+;
+
+// Attribute dictionaries
+attribute_entry:
+    dialect_attribute_entry
+    | dependent_attribute_entry
     | BARE_ID
 ;
 
-
-// ---------------------------------------------------------------------- Identifiers
-
-ssa_id:
-    '%' suffix_id ('#' DIGITS)?
+attribute_dict:
+    ('{' '}')
+    | ('{' attribute_entry (',' attribute_entry)* '}')
 ;
 
-// MLIR symbol references can contain dots: `@glob.private`, `@module.func`,
-// `@acc.routine`.  Cluster `mismatched '.'` was overwhelmingly symbol refs
-// whose dotted tail failed to parse.  (Q2 — opaque reference; mutator swaps
-// symbol targets at the attribute level, not within names.)
-symbol_ref_id:
-    '@' (suffix_id | string_literal) ('.' suffix_id)*
+// Location attributes: `loc("file":L:C)`, `loc("name")`, `loc(fused<tag>[...])`,
+// `loc(callsite(#loc at #loc1))`. Many seeds use `#loc = loc(...)` as a
+// top-level attribute alias; `loc(...)` is neither a dialect attribute nor a
+// standard attribute in the grammar. Keep it permissive with the existing
+// balanced-content machinery.  (Q2 — attribute reference, not a mutation
+// target for the fuzzer.)
+loc_attribute:
+    'loc' '(' (pretty_dialect_item_contents (',' pretty_dialect_item_contents)*)? ')'
 ;
 
-block_id:
-    '^' suffix_id
-;
+// === Types ===
 
 type_alias:
     '!' (string_literal | BARE_ID | (BARE_ID | '.')+)
 ;
-
-map_or_set_id:
-    '#' suffix_id
-;
-
-// `'loc'` is an ANTLR-implicit keyword (because `loc_attribute` / the old
-// `trailing_location` use it as a literal) and therefore no longer matches
-// BARE_ID.  `#loc = loc(...)` seeds (and `#loc1`, `#loc2`, etc. – those still
-// match BARE_ID since the tail of the name isn't just the keyword).  Accept
-// the literal `'loc'` here so top-level `#loc = ...` alias defs parse.  (Q2)
-attribute_alias:
-    '#' (string_literal | BARE_ID | 'loc')
-;
-
-ssa_id_list:
-    ssa_id (',' ssa_id)*
-;
-
-// Uses of an SSA value, e.g., in an operand list to an operation.
-ssa_use:
-    ssa_id
-    | constant_literal
-;
-
-ssa_use_list:
-    ssa_use (',' ssa_use)*
-;
-
-// ---------------------------------------------------------------------- Types
 
 // Dialect types - these can be opaque, pretty, or using custom dialects
 opaque_dialect_item:
@@ -207,133 +410,6 @@ mlir_type:
     | function_type
 ;
 
-// Uses of types
-type_list_no_parens:
-    mlir_type (',' mlir_type)*
-;
-
-type_list_parens:
-    ('(' ')')
-    | ('(' type_list_no_parens ')')
-;
-
-ssa_use_and_type:
-    ssa_use ':' mlir_type
-;
-
-ssa_use_and_type_list:
-    ssa_use_and_type (',' ssa_use_and_type)*
-;
-
-// ---------------------------------------------------------------------- Attributes
-
-// Simple attribute types
-array_attribute:
-    '[' (attribute_value ( ',' attribute_value)*)? ']'
-;
-
-bool_attribute:
-    bool_literal
-;
-
-dictionary_attribute:
-    '{' (attribute_entry ( ',' attribute_entry)*)? '}'
-;
-
-float_attribute:
-    (FLOAT_LITERAL optional_type)
-    | (HEXADECIMAL_LITERAL ':' mlir_type)
-;
-
-integer_attribute:
-    posneg_integer_literal optional_type
-;
-
-string_attribute:
-    string_literal optional_type
-;
-
-symbol_ref_attribute:
-    (symbol_ref_id ( '::' symbol_ref_id)*)
-;
-
-type_attribute:
-    mlir_type
-;
-
-// Standard attributes
-standard_attribute:
-    array_attribute
-    | bool_attribute
-    | dictionary_attribute
-    | float_attribute
-    | integer_attribute
-    | string_attribute
-    | symbol_ref_attribute
-    | type_attribute
-;
-
-// `attribute_alias` (`#foo`) and `dialect_attribute` (`#foo.bar<body>`) share
-// the same `#BARE_ID(.BARE_ID)?` prefix; put the more expressive
-// `dialect_attribute` first so the common bodied form doesn't require a
-// backtracked retry. Same rationale as `non_function_type` above.
-attribute_value:
-    dialect_attribute
-    | attribute_alias
-    | loc_attribute
-    | standard_attribute
-;
-
-// Location attributes: `loc("file":L:C)`, `loc("name")`, `loc(fused<tag>[...])`,
-// `loc(callsite(#loc at #loc1))`. Many seeds use `#loc = loc(...)` as a
-// top-level attribute alias; `loc(...)` is neither a dialect attribute nor a
-// standard attribute in the grammar. Keep it permissive with the existing
-// balanced-content machinery.  (Q2 — attribute reference, not a mutation
-// target for the fuzzer.)
-loc_attribute:
-    'loc' '(' (pretty_dialect_item_contents (',' pretty_dialect_item_contents)*)? ')'
-;
-
-
-dependent_attribute_entry:
-    BARE_ID '=' attribute_value
-;
-
-dialect_attribute_entry:
-    (BARE_ID '.' BARE_ID)
-    | (BARE_ID '.' BARE_ID '=' attribute_value)
-    | (string_literal '=' attribute_value)
-;
-
-// Dialect attributes
-dialect_attribute:
-    '#'? (opaque_dialect_item | pretty_dialect_item) (':' mlir_type)?
-;
-
-// Property dictionaries
-property_dict:
-    '<' attribute_dict '>'
-;
-
-// Attribute dictionaries
-attribute_entry:
-    dialect_attribute_entry
-    | dependent_attribute_entry
-    | BARE_ID
-;
-
-attribute_dict:
-    ('{' '}')
-    | ('{' attribute_entry (',' attribute_entry)* '}')
-;
-
-// ---------------------------------------------------------------------- Operations
-
-// Types that appear after the operation, indicating return types
-trailing_type:
-    ':' function_type
-;
-
 // Only `->` appears in generic-form seeds; `to` / `into` are custom-op syntax.
 // Listing them here made them ANTLR keywords, blocking legitimate uses of
 // `to` / `into` as BARE_ID attribute values or keys (e.g.
@@ -352,93 +428,146 @@ function_type_list:
     | non_function_type? (',' non_function_type)*
 ;
 
-// Operation results
-op_result:
-    ssa_id optional_int_literal
+// Uses of types
+type_list_no_parens:
+    mlir_type (',' mlir_type)*
 ;
 
-op_result_list:
-    op_result (',' op_result)* '='
+type_list_parens:
+    ('(' ')')
+    | ('(' type_list_no_parens ')')
 ;
 
-// Trailing location (for debug information)
-location:
-    string_literal ':' decimal_literal ':' decimal_literal
+// === Identifiers ===
+
+ssa_id:
+    '%' suffix_id ('#' DIGITS)?
 ;
 
-trailing_location:
-    ('loc' '(' location ')')
+ssa_id_list:
+    ssa_id (',' ssa_id)*
 ;
 
-// Undefined operations in all dialects
-generic_operation:
-    string_literal '(' optional_ssa_use_list ')' optional_successor_list optional_prop_dict
-        optional_region_list optional_attr_dict trailing_type
+// Uses of an SSA value, e.g., in an operand list to an operation.
+ssa_use:
+    ssa_id
+    | constant_literal
 ;
 
-custom_operation:
-    BARE_ID '.' BARE_ID optional_ssa_use_list trailing_type
+ssa_use_list:
+    ssa_use (',' ssa_use)*
 ;
 
-// Final operation definition NOTE: 'pymlir_dialect_ops' is defined externally by pyMLIR
-// `generic_module` was one of the alternatives but it's a strict subset of
-// `generic_operation` (no prop_dict, fewer optional bits) — any op matching
-// `generic_module` also matches `generic_operation`. Keeping it created a
-// duplicate reach-path that ALL(*) had to disambiguate at every string-literal
-// op. Chief culprit of loop_split's slow parse (19 nested `"builtin.module"`).
-// generic_module is still used by top-level `module_list` unchanged.
-operation:
-    optional_op_result_list
-    (
-        custom_operation
-        | generic_operation
-    ) optional_trailing_loc
+ssa_use_and_type:
+    ssa_use ':' mlir_type
 ;
 
-// ---------------------------------------------------------------------- Blocks and regions
-
-// Block arguments
-ssa_id_and_type:
-    ssa_id ':' mlir_type
+ssa_use_and_type_list:
+    ssa_use_and_type (',' ssa_use_and_type)*
 ;
 
-ssa_id_and_type_list:
-    ssa_id_and_type (',' ssa_id_and_type)*
+// MLIR symbol references can contain dots: `@glob.private`, `@module.func`,
+// `@acc.routine`.  Cluster `mismatched '.'` was overwhelmingly symbol refs
+// whose dotted tail failed to parse.  (Q2 — opaque reference; mutator swaps
+// symbol targets at the attribute level, not within names.)
+symbol_ref_id:
+    '@' (suffix_id | string_literal) ('.' suffix_id)*
 ;
 
-block_arg_list:
-    '(' optional_ssa_and_type_list ')'
+block_id:
+    '^' suffix_id
 ;
 
-operation_list:
-    operation+
+// `'loc'` is an ANTLR-implicit keyword (because `loc_attribute` / the old
+// `trailing_location` use it as a literal) and therefore no longer matches
+// BARE_ID.  `#loc = loc(...)` seeds (and `#loc1`, `#loc2`, etc. – those still
+// match BARE_ID since the tail of the name isn't just the keyword).  Accept
+// the literal `'loc'` here so top-level `#loc = ...` alias defs parse.  (Q2)
+attribute_alias:
+    '#' (string_literal | BARE_ID | 'loc')
 ;
 
-block_label:
-    block_id optional_block_arg_list ':'
+map_or_set_id:
+    '#' suffix_id
 ;
 
-successor_list:
-    '[' block_id? (',' block_id)* ']'
+// Identifier syntax
+suffix_id:
+    DIGITS
+    | BARE_ID
 ;
 
-// Generic-form printer emits empty block bodies like `^bb0:` followed by
-// nothing (when the entry block has block args but no ops), so allow a
-// labeled block with zero operations.
-block:
-    block_label operation*
-    | operation_list
+// === Affine / map / integer-set ===
+
+// maps, and integer sets
+dim_id_list:
+    '(' BARE_ID? (',' BARE_ID)* ')'
 ;
 
-region:
-    '{' block* '}'
+symbol_id_list:
+    '[' BARE_ID? (',' BARE_ID)* ']'
 ;
 
-region_list:
-    '(' region? (',' region)* ')'
+dim_and_symbol_id_lists:
+    dim_id_list optional_symbol_id_list
 ;
 
-// --------------------------------------------------------------------- ; Optional types ;
+symbol_or_const:
+    posneg_integer_literal
+    | ssa_id
+    | BARE_ID
+;
+
+dim_use_list:
+    '(' ssa_use_list? ')'
+;
+
+symbol_use_list:
+    '[' ssa_use_list? ']'
+;
+
+dim_and_symbol_use_list:
+    dim_use_list optional_symbol_use_list
+;
+
+// === Literals ===
+
+bool_literal:
+    TRUE
+    | FALSE
+;
+
+decimal_literal:
+    DIGITS
+;
+
+integer_literal:
+    decimal_literal
+    | HEXADECIMAL_LITERAL
+;
+
+negated_integer_literal:
+    '-' integer_literal
+;
+
+posneg_integer_literal:
+    integer_literal
+    | negated_integer_literal
+;
+
+string_literal:
+    ESCAPED_STRING
+;
+
+constant_literal:
+    bool_literal
+    | posneg_integer_literal
+    | FLOAT_LITERAL
+    | string_literal
+;
+
+// === Optional rules ===
+
 optional_symbol_ref_id:
     symbol_ref_id?
 ;
@@ -515,103 +644,7 @@ optional_region_list:
     region_list?
 ;
 
-// ---------------------------------------------------------------------- Modules and functions
-
-// Arguments
-named_argument:
-    ssa_id ':' mlir_type optional_attr_dict
-;
-
-argument_list:
-    (named_argument ( ',' named_argument)*)
-    | (mlir_type optional_attr_dict (',' mlir_type optional_attr_dict)*)
-;
-
-// Return values
-function_result:
-    mlir_type optional_attr_dict
-;
-
-function_result_list_no_parens:
-    function_result (',' function_result)*
-;
-
-function_result_list_parens:
-    ('(' ')')
-    | ('(' function_result_list_no_parens ')')
-;
-
-function_result_list:
-    function_result_list_parens
-;
-
-// Body
-function_body:
-    region
-;
-
-// Definition
-
-generic_module:
-    string_literal '(' argument_list? ')' '(' region ')' attribute_dict? trailing_type
-        trailing_location?
-;
-
-// ---------------------------------------------------------------------- (semi-)affine expressions,
-// maps, and integer sets
-
-dim_id_list:
-    '(' BARE_ID? (',' BARE_ID)* ')'
-;
-
-symbol_id_list:
-    '[' BARE_ID? (',' BARE_ID)* ']'
-;
-
-dim_and_symbol_id_lists:
-    dim_id_list optional_symbol_id_list
-;
-
-symbol_or_const:
-    posneg_integer_literal
-    | ssa_id
-    | BARE_ID
-;
-
-dim_use_list:
-    '(' ssa_use_list? ')'
-;
-
-symbol_use_list:
-    '[' ssa_use_list? ']'
-;
-
-dim_and_symbol_use_list:
-    dim_use_list optional_symbol_use_list
-;
-
-// ---------------------------------------------------------------------- General structure and
-// top-level definitions
-
-// Definitions of affine maps/integer sets/aliases are at the top of the file.
-// The historical `'type'` literal made `type` an ANTLR-implicit keyword,
-// which blocked every attribute-dict entry whose key is literally `type`
-// (e.g. `{type = !emitc.array<1xf32>}`, common in EmitC / Cpp / SPIR-V /
-// OpenACC seeds — cluster `mismatched 'type'`).  Generic-form seeds in this
-// corpus don't use the `type` keyword at all, so the simpler equals-form
-// covers them without introducing the keyword.  (Q2)
-type_alias_def:
-    type_alias '=' mlir_type
-;
-
-attribute_alias_def:
-    attribute_alias '=' attribute_value
-;
-
-definition:
-    type_alias_def
-    | attribute_alias_def
-;
+// === Lexer rules and fragments ===
 
 // Tokens
 ESCAPED_STRING:
@@ -624,48 +657,9 @@ ESCAPED_STRING:
     )
 ;
 
-// ---------------------------------------------------------------------- Literals
-
-
-
-bool_literal:
-    TRUE
-    | FALSE
-;
-
-decimal_literal:
-    DIGITS
-;
-
 HEXADECIMAL_LITERAL:
     '0x' [0-9a-fA-F]+
 ;
-
-integer_literal:
-    decimal_literal
-    | HEXADECIMAL_LITERAL
-;
-
-negated_integer_literal:
-    '-' integer_literal
-;
-
-posneg_integer_literal:
-    integer_literal
-    | negated_integer_literal
-;
-
-string_literal:
-    ESCAPED_STRING
-;
-
-constant_literal:
-    bool_literal
-    | posneg_integer_literal
-    | FLOAT_LITERAL
-    | string_literal
-;
-
 
 FLOAT_LITERAL:
     [-+]? [0-9]+ [.][0-9]* ([eE][-+]? [0-9]+)?
@@ -679,24 +673,12 @@ NONZERO_DIGIT:
     [1-9]
 ;
 
-fragment DIGIT:
-    [0-9]
-;
-
-fragment LETTER:
-    [a-zA-Z]
-;
-
 TRUE:
     'true'
 ;
 
 FALSE:
     'false'
-;
-
-fragment ID_CHARS:
-    [$]
 ;
 
 BARE_ID:
@@ -717,4 +699,16 @@ LINE_COMMENT:
 // Rare in seeds but cheap to add for symmetry.
 BLOCK_COMMENT:
     '/*' .*? '*/' -> skip
+;
+
+fragment DIGIT:
+    [0-9]
+;
+
+fragment LETTER:
+    [a-zA-Z]
+;
+
+fragment ID_CHARS:
+    [$]
 ;
