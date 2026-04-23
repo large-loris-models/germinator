@@ -1,23 +1,67 @@
-#include "edit.h"
+// edit_mutation.cc
+//
+// Implementation of the EditMutation (plus the shared graft_fragment()
+// routine used by other mutations).
+//
+// Algorithm for a full edit:
+//   1. Select a (recipient_node, donor_node) pair of the same rule name,
+//      where grafting donor_node under recipient_node won't exceed
+//      max_depth and passes the context filter.
+//   2. Clone the full donor tree so context indexing sees the complete tree.
+//   3. Locate the clone of donor_node within the cloned tree.
+//   4. Detect "parameters" in the donor fragment — nodes appearing both
+//      inside the donor subtree and outside it (in the donor's context)
+//      with identical serialized text.  Blacklisted names are skipped.
+//   5. Walk common ancestors of recipient_node and donor_node to collect
+//      concrete parameter values from the recipient's context.
+//   6. Substitute parameters in the cloned donor fragment.
+//   7. Check fitness: were required parameters (should_substitute)
+//      fulfilled?
+//   8. Graft the adapted fragment in place of recipient_node.
+//
+// If the donor has no children, falls back to a simple graft.
 
+#include "edit_mutation.h"
+
+#include "context_filter.h"
+
+#include <grammarinator/runtime/Population.hpp>
 #include <grammarinator/runtime/Rule.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <random>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace mlir_fuzzer {
 
+using grammarinator::runtime::Annotations;
 using grammarinator::runtime::ParentRule;
 using grammarinator::runtime::Rule;
 using grammarinator::runtime::UnlexerRule;
+using NodeKey = Annotations::NodeKey;
+
+// ---------------------------------------------------------------------------
+// Shared config
+// ---------------------------------------------------------------------------
+
+EditConfig default_edit_config() {
+  EditConfig cfg;
+  cfg.parameter_blacklist["string_literal"] = {"generic_operation"};
+  cfg.should_substitute["ssa_id"] = {"ssa_use"};
+  cfg.should_substitute["non_function_type"] = {"*"};
+  return cfg;
+}
 
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
+
+namespace {
 
 using NodeIndex = std::unordered_map<std::string, std::vector<Rule *>>;
 using ParameterMap = std::unordered_map<Rule *, std::vector<Rule *>>;
@@ -28,32 +72,22 @@ using ParameterValues = std::unordered_map<Rule *, std::vector<Rule *>>;
 // ---------------------------------------------------------------------------
 //
 // Recursively collect all named Rule* nodes (UnlexerRule and UnparserRule)
-// in the subtree rooted at `current`, grouped by name.
-// The subtree rooted at `exclude` is skipped entirely.
-// Nodes matching the parameter blacklist are skipped.
+// in the subtree rooted at `current`, grouped by name.  The subtree rooted
+// at `exclude` is skipped entirely.  Nodes matching the parameter blacklist
+// are skipped.
 
-static void index_nodes(Rule *current, NodeIndex &index, const Rule *exclude,
-                        const ParameterBlacklist &blacklist) {
-  if (!current)
-    return;
-  if (current == exclude)
-    return;
+void index_nodes(Rule *current, NodeIndex &index, const Rule *exclude,
+                 const ParameterBlacklist &blacklist) {
+  if (!current) return;
+  if (current == exclude) return;
 
-  // Check parameter blacklist: skip this node (and its subtree) if blacklisted.
-  // Format: "parent.child" means skip child when its parent matches.
-  // A child entry with "*" as parents means skip under any parent.
   auto bl_it = blacklist.find(current->name);
   if (bl_it != blacklist.end()) {
     const auto &parents = bl_it->second;
-    if (parents.empty()) {
-      // Wildcard: blacklisted under any parent.
-      return;
-    }
+    if (parents.empty()) return;  // wildcard: always blacklisted
     if (current->parent) {
       for (const auto &p : parents) {
-        if (p == "*" || p == current->parent->name) {
-          return;
-        }
+        if (p == "*" || p == current->parent->name) return;
       }
     }
   }
@@ -77,17 +111,13 @@ static void index_nodes(Rule *current, NodeIndex &index, const Rule *exclude,
 //
 // Find "parameters": nodes appearing in both the fragment (children of
 // donor_node) and the context (donor tree outside donor_node) with identical
-// serialized text.
-//
-// donor_root and donor_node must both be within the same cloned tree so that
-// pointer identity is stable and context indexing sees the full tree.
+// serialized text.  donor_root and donor_node must be in the same cloned
+// tree so pointer identity is stable.
 
-static ParameterMap collect_parameters(Rule *donor_root, Rule *donor_node,
-                                       const ParameterBlacklist &blacklist) {
+ParameterMap collect_parameters(Rule *donor_root, Rule *donor_node,
+                                const ParameterBlacklist &blacklist) {
   NodeIndex fragment_index, context_index;
 
-  // Index only the children of donor_node, not donor_node itself.
-  // This matches the Python: "for child in mutant_donor.children"
   if (donor_node->type != Rule::UnlexerRuleType) {
     auto *p = static_cast<ParentRule *>(donor_node);
     for (auto *child : p->children) {
@@ -98,11 +128,9 @@ static ParameterMap collect_parameters(Rule *donor_root, Rule *donor_node,
   index_nodes(donor_root, context_index, /*exclude=*/donor_node, blacklist);
 
   ParameterMap parameters;
-
   for (const auto &[name, fragment_nodes] : fragment_index) {
     auto it = context_index.find(name);
-    if (it == context_index.end())
-      continue;
+    if (it == context_index.end()) continue;
     const auto &context_nodes = it->second;
 
     for (auto *frag_node : fragment_nodes) {
@@ -113,7 +141,6 @@ static ParameterMap collect_parameters(Rule *donor_root, Rule *donor_node,
       }
     }
   }
-
   return parameters;
 }
 
@@ -121,45 +148,32 @@ static ParameterMap collect_parameters(Rule *donor_root, Rule *donor_node,
 // match_nodes (forward declaration for mutual recursion)
 // ---------------------------------------------------------------------------
 
-static void match_nodes(const std::vector<Rule *> &abstract_nodes,
-                        const std::vector<Rule *> &concrete_nodes,
-                        const ParameterMap &parameters,
-                        ParameterValues &parameter_values);
+void match_nodes(const std::vector<Rule *> &abstract_nodes,
+                 const std::vector<Rule *> &concrete_nodes,
+                 const ParameterMap &parameters,
+                 ParameterValues &parameter_values);
 
-// ---------------------------------------------------------------------------
-// recursively_match_nodes
-// ---------------------------------------------------------------------------
-
-static void recursively_match_nodes(Rule *abstract_node, Rule *concrete_node,
-                                    const ParameterMap &parameters,
-                                    ParameterValues &parameter_values) {
+void recursively_match_nodes(Rule *abstract_node, Rule *concrete_node,
+                             const ParameterMap &parameters,
+                             ParameterValues &parameter_values) {
   if (abstract_node->type == Rule::UnlexerRuleType ||
       concrete_node->type == Rule::UnlexerRuleType) {
     return;
   }
-
   auto *a_parent = static_cast<ParentRule *>(abstract_node);
   auto *c_parent = static_cast<ParentRule *>(concrete_node);
   match_nodes(a_parent->children, c_parent->children, parameters,
               parameter_values);
 }
 
-// ---------------------------------------------------------------------------
-// match_nodes
-// ---------------------------------------------------------------------------
-//
 // Greedy left-to-right name-based matching of abstract (donor) nodes against
 // concrete (recipient) nodes.  On name match, if abstract is a parameter,
 // record concrete as a candidate value; otherwise recurse into children.
-// On exhaustion without match, reset scan position so later abstract nodes
-// can still match earlier concrete nodes.
-
-static void match_nodes(const std::vector<Rule *> &abstract_nodes,
-                        const std::vector<Rule *> &concrete_nodes,
-                        const ParameterMap &parameters,
-                        ParameterValues &parameter_values) {
+void match_nodes(const std::vector<Rule *> &abstract_nodes,
+                 const std::vector<Rule *> &concrete_nodes,
+                 const ParameterMap &parameters,
+                 ParameterValues &parameter_values) {
   size_t c_idx = 0;
-
   for (size_t a_idx = 0; a_idx < abstract_nodes.size(); ++a_idx) {
     Rule *a_node = abstract_nodes[a_idx];
     size_t old_idx = c_idx;
@@ -168,7 +182,6 @@ static void match_nodes(const std::vector<Rule *> &abstract_nodes,
     while (c_idx < concrete_nodes.size()) {
       Rule *c_node = concrete_nodes[c_idx];
       ++c_idx;
-
       if (a_node->name == c_node->name) {
         found = true;
         if (parameters.count(a_node)) {
@@ -179,27 +192,14 @@ static void match_nodes(const std::vector<Rule *> &abstract_nodes,
         break;
       }
     }
-
-    if (!found) {
-      c_idx = old_idx;
-    }
+    if (!found) c_idx = old_idx;
   }
 }
 
-// ---------------------------------------------------------------------------
-// collect_parameter_values
-// ---------------------------------------------------------------------------
-//
 // Walk up from recipient_node and donor_node simultaneously, collecting
-// siblings at each level and calling match_nodes to find substitution values.
-//
-// Stops when parent names diverge — matches Python behavior:
-//   while concrete.parent and abstract.parent
-//         and (concrete.parent.name == abstract.parent.name)
-
-static ParameterValues
-collect_parameter_values(Rule *recipient_node, Rule *donor_node,
-                         const ParameterMap &parameters) {
+// sibling lists at each level.  Stops when parent names diverge.
+ParameterValues collect_parameter_values(Rule *recipient_node, Rule *donor_node,
+                                         const ParameterMap &parameters) {
   ParameterValues parameter_values;
 
   Rule *r = recipient_node;
@@ -207,7 +207,6 @@ collect_parameter_values(Rule *recipient_node, Rule *donor_node,
 
   while (r && d && r->parent && d->parent &&
          r->parent->name == d->parent->name) {
-    // Collect left siblings
     {
       std::vector<Rule *> left_abstract, left_concrete;
       for (Rule *s = d->left_sibling(); s; s = s->left_sibling())
@@ -219,7 +218,6 @@ collect_parameter_values(Rule *recipient_node, Rule *donor_node,
       if (!left_abstract.empty() && !left_concrete.empty())
         match_nodes(left_abstract, left_concrete, parameters, parameter_values);
     }
-    // Collect right siblings
     {
       std::vector<Rule *> right_abstract, right_concrete;
       for (Rule *s = d->right_sibling(); s; s = s->right_sibling())
@@ -230,25 +228,16 @@ collect_parameter_values(Rule *recipient_node, Rule *donor_node,
         match_nodes(right_abstract, right_concrete, parameters,
                     parameter_values);
     }
-
     r = r->parent;
     d = d->parent;
   }
-
   return parameter_values;
 }
 
-// ---------------------------------------------------------------------------
-// simple_graft (no parameter substitution)
-// ---------------------------------------------------------------------------
-//
 // Equivalent to Python's recombine(): deep-copy donor, graft into recipient.
-// Used when donor has no children or parameters are disabled.
-
-static EditResult simple_graft(Rule *recipient_node, Rule *donor_node,
-                               Rule *donor_root) {
+// Used when donor has no children.
+EditFragmentResult simple_graft(Rule *recipient_node, Rule *donor_node) {
   Rule *cloned_donor = donor_node->clone();
-
   recipient_node->replace(cloned_donor);
   delete recipient_node;
 
@@ -256,32 +245,20 @@ static EditResult simple_graft(Rule *recipient_node, Rule *donor_node,
   while (root->parent && root->parent->name != "<ROOT>") {
     root = root->parent;
   }
-
   return {root, /*is_fit=*/true};
 }
 
-// ---------------------------------------------------------------------------
-// check_should_substitute
-// ---------------------------------------------------------------------------
-//
 // Fitness check: verify that parameter nodes matching should_substitute
-// criteria were actually substituted.  Returns true if all required
-// substitutions were performed.
-
-static bool
-check_should_substitute(const ParameterMap &parameters,
-                        const std::unordered_set<Rule *> &replaced_nodes,
-                        const ShouldSubstituteSet &should_substitute) {
-
-  if (should_substitute.empty())
-    return true;
+// criteria were actually substituted.
+bool check_should_substitute(const ParameterMap &parameters,
+                             const std::unordered_set<Rule *> &replaced_nodes,
+                             const ShouldSubstituteSet &should_substitute) {
+  if (should_substitute.empty()) return true;
 
   for (const auto &[ctx_node, frag_nodes] : parameters) {
     for (auto *frag_node : frag_nodes) {
-      // Check if this node requires substitution
       auto it = should_substitute.find(frag_node->name);
-      if (it == should_substitute.end())
-        continue;
+      if (it == should_substitute.end()) continue;
 
       const auto &parents = it->second;
       bool requires_sub = false;
@@ -306,11 +283,62 @@ check_should_substitute(const ParameterMap &parameters,
 }
 
 // ---------------------------------------------------------------------------
-// edit  (top-level)
+// select_edit_pair
+// ---------------------------------------------------------------------------
+//
+// Pick matching (recipient_node, donor_node) names that can be grafted
+// without blowing past max_depth and that pass the context filter.
+
+std::pair<Rule *, Rule *> select_edit_pair(Annotations &r_annot,
+                                           Annotations &d_annot, int max_depth,
+                                           const ContextFilter &context_filter,
+                                           std::mt19937 &rng) {
+  const auto &r_by_name = r_annot.rules_by_name();
+  const auto &d_by_name = d_annot.rules_by_name();
+  const auto &r_info = r_annot.node_info();
+  const auto &d_info = d_annot.node_info();
+
+  std::vector<NodeKey> common_keys;
+  for (const auto &[key, nodes] : r_by_name) {
+    if (d_by_name.count(key)) common_keys.push_back(key);
+  }
+  std::shuffle(common_keys.begin(), common_keys.end(), rng);
+
+  for (const auto &key : common_keys) {
+    std::vector<Rule *> r_nodes = r_by_name.at(key);
+    std::vector<Rule *> d_nodes = d_by_name.at(key);
+    std::shuffle(r_nodes.begin(), r_nodes.end(), rng);
+    std::shuffle(d_nodes.begin(), d_nodes.end(), rng);
+
+    for (Rule *r_node : r_nodes) {
+      auto r_it = r_info.find(r_node);
+      if (r_it == r_info.end()) continue;
+      int r_level = r_it->second.level;
+
+      for (Rule *d_node : d_nodes) {
+        auto d_it = d_info.find(d_node);
+        if (d_it == d_info.end()) continue;
+        int d_depth = d_it->second.depth;
+
+        if (r_level + d_depth > max_depth) continue;
+        if (!context_filter.verify(r_node, d_node)) continue;
+
+        return {r_node, d_node};
+      }
+    }
+  }
+  return {nullptr, nullptr};
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// graft_fragment — shared low-level graft
 // ---------------------------------------------------------------------------
 
-EditResult edit(Rule *recipient_node, Rule *donor_node, Rule *recipient_root,
-                Rule *donor_root, std::mt19937 &rng, const EditConfig &config) {
+EditFragmentResult graft_fragment(Rule *recipient_node, Rule *donor_node,
+                                  Rule *recipient_root, Rule *donor_root,
+                                  std::mt19937 &rng, const EditConfig &config) {
   (void)recipient_root;
 
   if (recipient_node->name != donor_node->name) {
@@ -318,14 +346,13 @@ EditResult edit(Rule *recipient_node, Rule *donor_node, Rule *recipient_root,
   }
 
   // If donor has no children, fall back to simple graft (no parameter sub).
-  // Matches Python: "if not donor_node.children or self._disable_parameters"
   if (donor_node->type == Rule::UnlexerRuleType) {
-    return simple_graft(recipient_node, donor_node, donor_root);
+    return simple_graft(recipient_node, donor_node);
   }
   {
     auto *dp = static_cast<ParentRule *>(donor_node);
     if (dp->children.empty()) {
-      return simple_graft(recipient_node, donor_node, donor_root);
+      return simple_graft(recipient_node, donor_node);
     }
   }
 
@@ -337,16 +364,13 @@ EditResult edit(Rule *recipient_node, Rule *donor_node, Rule *recipient_root,
   {
     std::vector<std::pair<Rule *, Rule *>> stack;
     stack.push_back({donor_root, cloned_donor_root});
-
     while (!stack.empty()) {
       auto [orig, clone] = stack.back();
       stack.pop_back();
-
       if (orig == donor_node) {
         cloned_donor_node = clone;
         break;
       }
-
       if (orig->type != Rule::UnlexerRuleType) {
         auto *op = static_cast<ParentRule *>(orig);
         auto *cp = static_cast<ParentRule *>(clone);
@@ -376,17 +400,14 @@ EditResult edit(Rule *recipient_node, Rule *donor_node, Rule *recipient_root,
 
   for (const auto &[ctx_node, frag_orig_nodes] : parameters) {
     auto val_it = parameter_values.find(ctx_node);
-    if (val_it == parameter_values.end() || val_it->second.empty())
-      continue;
+    if (val_it == parameter_values.end() || val_it->second.empty()) continue;
 
     const auto &candidates = val_it->second;
     Rule *chosen = candidates[std::uniform_int_distribution<size_t>(
         0, candidates.size() - 1)(rng)];
 
     for (auto *frag_node : frag_orig_nodes) {
-      if (already_replaced.count(frag_node))
-        continue;
-
+      if (already_replaced.count(frag_node)) continue;
       already_replaced.insert(frag_node);
 
       Rule *replacement = chosen->clone();
@@ -395,8 +416,7 @@ EditResult edit(Rule *recipient_node, Rule *donor_node, Rule *recipient_root,
     }
   }
 
-  for (auto *n : detached_nodes)
-    delete n;
+  for (auto *n : detached_nodes) delete n;
 
   // Step 6: Fitness check — did required parameters get substituted?
   bool is_fit = check_should_substitute(parameters, already_replaced,
@@ -415,8 +435,44 @@ EditResult edit(Rule *recipient_node, Rule *donor_node, Rule *recipient_root,
   while (root->parent && root->parent->name != "<ROOT>") {
     root = root->parent;
   }
-
   return {root, is_fit};
 }
 
-} // namespace mlir_fuzzer
+// ---------------------------------------------------------------------------
+// EditMutation
+// ---------------------------------------------------------------------------
+
+EditMutation::EditMutation() : edit_config_(default_edit_config()) {
+  const char *env_depth = std::getenv("GRAMMARINATOR_MAX_DEPTH");
+  max_depth_ = env_depth ? std::atoi(env_depth) : 30;
+  k_ancestors_ = 4;
+  l_siblings_ = 4;
+  r_siblings_ = 4;
+}
+
+bool EditMutation::canApply(const MutationInput &input) const {
+  return input.tree1 != nullptr && input.tree2 != nullptr;
+}
+
+MutationResult EditMutation::apply(const MutationInput &input) const {
+  if (!input.tree1 || !input.tree2) return {nullptr, false, {}};
+
+  ContextFilter context_filter{k_ancestors_, l_siblings_, r_siblings_};
+
+  Annotations r_annot(input.tree1);
+  Annotations d_annot(input.tree2);
+
+  auto [r_node, d_node] =
+      select_edit_pair(r_annot, d_annot, max_depth_, context_filter, input.rng);
+
+  if (!r_node || !d_node) return {nullptr, false, {}};
+
+  EditFragmentResult result = graft_fragment(
+      r_node, d_node, input.tree1, input.tree2, input.rng, edit_config_);
+
+  if (!result.root) return {nullptr, false, {}};
+
+  return {result.root, /*success=*/true, "edit"};
+}
+
+}  // namespace mlir_fuzzer

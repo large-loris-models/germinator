@@ -16,15 +16,15 @@
 //
 // Verifier is disabled: we want to catch process-level crashes only, not
 // post-pass IR validity issues.
+//
+// Tree mutations are owned by MutationRegistry.  The harness has no knowledge
+// of specific mutation names — adding a new mutation requires no edits here.
 // =============================================================================
 
 #include "grlf.h"
 #include "grlf_codec.h"
 
-#include "context_filter.h"
-#include "edit.h"
-#include "insert.h"
-#include "insert_patterns.h"
+#include "src/mutator/registry.h"
 
 #include <grammarinator/runtime/Population.hpp>
 #include <grammarinator/runtime/Rule.hpp>
@@ -42,16 +42,12 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Transforms/Passes.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <random>
 #include <string>
-#include <vector>
 
-using grammarinator::runtime::Annotations;
 using grammarinator::runtime::Rule;
-using NodeKey = Annotations::NodeKey;
 
 // =============================================================================
 // MLIR context — initialized once before main
@@ -79,23 +75,6 @@ __attribute__((constructor)) static void initMLIR() {
 
 namespace {
 
-int g_max_depth = 30;
-mlir_fuzzer::ContextFilter g_context_filter{4, 4, 4};
-
-const mlir_fuzzer::InsertPatterns &get_patterns() {
-  static const mlir_fuzzer::InsertPatterns patterns =
-      mlir_fuzzer::get_insert_patterns();
-  return patterns;
-}
-
-mlir_fuzzer::EditConfig g_edit_config = []() {
-  mlir_fuzzer::EditConfig cfg;
-  cfg.parameter_blacklist["string_literal"] = {"generic_operation"};
-  cfg.should_substitute["ssa_id"] = {"ssa_use"};
-  cfg.should_substitute["non_function_type"] = {"*"};
-  return cfg;
-}();
-
 // Cheap content-derived hash. Used to pick which pass an input runs through;
 // stable for a given input so coverage feedback is meaningful (same input
 // always exercises the same pass).
@@ -116,11 +95,6 @@ uint32_t fnv1a(const uint8_t *data, size_t size) {
 
 extern "C" int LLVMFuzzerInitialize(int *argc, char ***argv) {
   GrammarinatorInitialize(argc, argv);
-
-  if (const char *env_depth = getenv("GRAMMARINATOR_MAX_DEPTH")) {
-    g_max_depth = atoi(env_depth);
-  }
-
   return 0;
 }
 
@@ -198,62 +172,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
 }
 
 // =============================================================================
-// Mutation — single tree, 100% Grammarinator
-// =============================================================================
-
-extern "C" size_t LLVMFuzzerCustomMutator(uint8_t *Data, size_t Size,
-                                          size_t MaxSize, unsigned int Seed) {
-  return GrammarinatorMutator(Data, Size, MaxSize, Seed);
-}
-
-// =============================================================================
-// Crossover helpers (unchanged from previous version)
+// Mutation helpers
 // =============================================================================
 
 namespace {
-
-std::pair<Rule *, Rule *>
-select_edit_pair(Annotations &r_annot, Annotations &d_annot, int max_depth,
-                 const mlir_fuzzer::ContextFilter &context_filter,
-                 std::mt19937 &rng) {
-  const auto &r_by_name = r_annot.rules_by_name();
-  const auto &d_by_name = d_annot.rules_by_name();
-  const auto &r_info = r_annot.node_info();
-  const auto &d_info = d_annot.node_info();
-
-  std::vector<NodeKey> common_keys;
-  for (const auto &[key, nodes] : r_by_name) {
-    if (d_by_name.count(key)) {
-      common_keys.push_back(key);
-    }
-  }
-  std::shuffle(common_keys.begin(), common_keys.end(), rng);
-
-  for (const auto &key : common_keys) {
-    std::vector<Rule *> r_nodes = r_by_name.at(key);
-    std::vector<Rule *> d_nodes = d_by_name.at(key);
-    std::shuffle(r_nodes.begin(), r_nodes.end(), rng);
-    std::shuffle(d_nodes.begin(), d_nodes.end(), rng);
-
-    for (Rule *r_node : r_nodes) {
-      auto r_it = r_info.find(r_node);
-      if (r_it == r_info.end()) continue;
-      int r_level = r_it->second.level;
-
-      for (Rule *d_node : d_nodes) {
-        auto d_it = d_info.find(d_node);
-        if (d_it == d_info.end()) continue;
-        int d_depth = d_it->second.depth;
-
-        if (r_level + d_depth > max_depth) continue;
-        if (!context_filter.verify(r_node, d_node)) continue;
-
-        return {r_node, d_node};
-      }
-    }
-  }
-  return {nullptr, nullptr};
-}
 
 size_t encode_result(Rule *root, uint8_t *Out, size_t MaxOutSize) {
   size_t out_size = grlf_encode_tree(root, Out, MaxOutSize);
@@ -261,9 +183,15 @@ size_t encode_result(Rule *root, uint8_t *Out, size_t MaxOutSize) {
   return out_size;
 }
 
-size_t grammarinator_fallback(const uint8_t *Data1, size_t Size1,
-                              const uint8_t *Data2, size_t Size2, uint8_t *Out,
-                              size_t MaxOutSize, unsigned int Seed) {
+size_t grammarinator_mutator_fallback(uint8_t *Data, size_t Size, size_t MaxSize,
+                                      unsigned int Seed) {
+  return GrammarinatorMutator(Data, Size, MaxSize, Seed);
+}
+
+size_t grammarinator_crossover_fallback(const uint8_t *Data1, size_t Size1,
+                                        const uint8_t *Data2, size_t Size2,
+                                        uint8_t *Out, size_t MaxOutSize,
+                                        unsigned int Seed) {
   return GrammarinatorCrossOver(const_cast<uint8_t *>(Data1), Size1, Data2,
                                 Size2, Out, MaxOutSize, Seed);
 }
@@ -271,7 +199,32 @@ size_t grammarinator_fallback(const uint8_t *Data1, size_t Size1,
 }  // namespace
 
 // =============================================================================
-// Crossover — two trees, 50/50 edit/insert
+// Mutation — single tree
+// =============================================================================
+
+extern "C" size_t LLVMFuzzerCustomMutator(uint8_t *Data, size_t Size,
+                                          size_t MaxSize, unsigned int Seed) {
+  std::mt19937 rng(Seed);
+
+  Rule *tree1 = grlf_decode_tree(Data, Size);
+  if (!tree1) {
+    return grammarinator_mutator_fallback(Data, Size, MaxSize, Seed);
+  }
+
+  mlir_fuzzer::MutationInput input{tree1, /*tree2=*/nullptr, rng};
+  mlir_fuzzer::MutationResult result =
+      mlir_fuzzer::MutationRegistry::instance().applyRandomSingleTree(input);
+
+  if (result.success && result.root) {
+    return encode_result(result.root, Data, MaxSize);
+  }
+
+  delete tree1;
+  return grammarinator_mutator_fallback(Data, Size, MaxSize, Seed);
+}
+
+// =============================================================================
+// Crossover — two trees
 // =============================================================================
 
 extern "C" size_t LLVMFuzzerCustomCrossOver(const uint8_t *Data1, size_t Size1,
@@ -279,8 +232,6 @@ extern "C" size_t LLVMFuzzerCustomCrossOver(const uint8_t *Data1, size_t Size1,
                                             uint8_t *Out, size_t MaxOutSize,
                                             unsigned int Seed) {
   std::mt19937 rng(Seed);
-  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-  float roll = dist(rng);
 
   Rule *tree1 = grlf_decode_tree(Data1, Size1);
   Rule *tree2 = grlf_decode_tree(Data2, Size2);
@@ -288,44 +239,23 @@ extern "C" size_t LLVMFuzzerCustomCrossOver(const uint8_t *Data1, size_t Size1,
   if (!tree1 || !tree2) {
     delete tree1;
     delete tree2;
-    return grammarinator_fallback(Data1, Size1, Data2, Size2, Out, MaxOutSize,
-                                  Seed);
+    return grammarinator_crossover_fallback(Data1, Size1, Data2, Size2, Out,
+                                            MaxOutSize, Seed);
   }
 
-  if (roll < 0.5f) {
-    Annotations r_annot(tree1);
-    Annotations d_annot(tree2);
+  mlir_fuzzer::MutationInput input{tree1, tree2, rng};
+  mlir_fuzzer::MutationResult result =
+      mlir_fuzzer::MutationRegistry::instance().applyRandomCrossover(input);
 
-    Rule *r_node = nullptr;
-    Rule *d_node = nullptr;
-    std::tie(r_node, d_node) =
-        select_edit_pair(r_annot, d_annot, g_max_depth, g_context_filter, rng);
+  // tree2 is never consumed by a mutation — always delete it here.
+  delete tree2;
 
-    if (r_node && d_node) {
-      mlir_fuzzer::EditResult result =
-          mlir_fuzzer::edit(r_node, d_node, tree1, tree2, rng, g_edit_config);
-
-      delete tree2;
-
-      if (result.root) {
-        return encode_result(result.root, Out, MaxOutSize);
-      }
-      return grammarinator_fallback(Data1, Size1, Data2, Size2, Out, MaxOutSize,
-                                    Seed);
-    }
-
-    delete tree1;
-    delete tree2;
-    return grammarinator_fallback(Data1, Size1, Data2, Size2, Out, MaxOutSize,
-                                  Seed);
-  }
-
-  {
-    mlir_fuzzer::InsertResult result =
-        mlir_fuzzer::insert(tree1, tree2, get_patterns(), g_context_filter,
-                            /*max_inserts=*/1, rng, g_edit_config);
-
-    delete tree2;
+  if (result.success && result.root) {
+    // On success, tree1 was consumed by the mutation (or is now result.root).
     return encode_result(result.root, Out, MaxOutSize);
   }
+
+  delete tree1;
+  return grammarinator_crossover_fallback(Data1, Size1, Data2, Size2, Out,
+                                          MaxOutSize, Seed);
 }
