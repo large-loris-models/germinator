@@ -13,7 +13,7 @@
 
 #pragma once
 
-#include "insert.h"
+#include "tree_mutations/insert_mutation.h"
 
 #include <climits>
 #include <string>
