@@ -94,7 +94,7 @@ echo "[test] found ${#CT_LIBS[@]} cuda-tile libraries"
 echo "[test] compiling stubs..."
 STUBS_OBJ="$BUILD_OUT/test_stubs.o"
 "$CXX" -g -O2 -std=c++20 \
-    -c "$PROJECT_ROOT/src/test_stubs.cc" \
+    -c "$PROJECT_ROOT/tests/test_stubs.cc" \
     -o "$STUBS_OBJ"
 
 # ── Common include flags ────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ echo "[test] compiling test_mutations.cc..."
 TEST_OBJ="$BUILD_OUT/test_mutations.o"
 "$CXX" -g -O2 -std=c++20 \
     "${INCLUDE_FLAGS[@]}" \
-    -c "$PROJECT_ROOT/src/test_mutations.cc" \
+    -c "$PROJECT_ROOT/tests/test_mutations.cc" \
     -o "$TEST_OBJ"
 
 # ── Link ────────────────────────────────────────────────────────────────────
