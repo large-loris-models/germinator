@@ -33,8 +33,9 @@ fi
 HARNESS_SRC="$PROJECT_ROOT/src/harness/mlir_fuzz_target.cc"
 MUTATOR_SRCS=(
     "$PROJECT_ROOT/src/mutator/context_filter.cc"
-    "$PROJECT_ROOT/src/mutator/edit.cc"
-    "$PROJECT_ROOT/src/mutator/insert.cc"
+    "$PROJECT_ROOT/src/mutator/registry.cc"
+    "$PROJECT_ROOT/src/mutator/tree_mutations/edit_mutation.cc"
+    "$PROJECT_ROOT/src/mutator/tree_mutations/insert_mutation.cc"
 )
 
 mkdir -p "$BUILD_OUT"

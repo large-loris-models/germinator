@@ -2,11 +2,32 @@
 # =============================================================================
 # test_mutations.sh — Build and run the standalone mutation test
 # =============================================================================
-# Builds test_mutations against the sancov LLVM/cuda-tile builds and runs it
-# against two random GRTF trees from seeds/trees/.
+# Builds test_mutations against the sancov LLVM/cuda-tile builds, then runs
+# both the per-mutation benchmark and the composition stress test over the
+# GRTF trees in seeds/trees/.
+#
+# Flags:
+#   --quick    Use 10 iterations instead of 100 (for CI / development).
 # =============================================================================
 source "$(dirname "$0")/env.sh"
 check_prereqs
+
+# ── Parse flags ─────────────────────────────────────────────────────────────
+QUICK=0
+for arg in "$@"; do
+    case "$arg" in
+        --quick) QUICK=1 ;;
+        *) echo "WARNING: unknown arg: $arg" >&2 ;;
+    esac
+done
+
+if (( QUICK )); then
+    BASIC_ITERS=10
+    COMPOSE_TRIALS=10
+else
+    BASIC_ITERS=100
+    COMPOSE_TRIALS=50
+fi
 
 # ── Resolve dynamic paths ───────────────────────────────────────────────────
 GRAMMARINATOR_CXX="$GRAMMARINATOR_SRC/grammarinator-cxx"
@@ -96,8 +117,9 @@ INCLUDE_FLAGS=(
 echo "[test] compiling mutator sources..."
 MUTATOR_SRCS=(
     "$PROJECT_ROOT/src/mutator/context_filter.cc"
-    "$PROJECT_ROOT/src/mutator/edit.cc"
-    "$PROJECT_ROOT/src/mutator/insert.cc"
+    "$PROJECT_ROOT/src/mutator/registry.cc"
+    "$PROJECT_ROOT/src/mutator/tree_mutations/edit_mutation.cc"
+    "$PROJECT_ROOT/src/mutator/tree_mutations/insert_mutation.cc"
 )
 MUTATOR_OBJS=()
 
@@ -144,27 +166,31 @@ echo "────────────────────────�
 echo " Running mutation test"
 echo "────────────────────────────────────────────────────────────"
 
-# Pick the first two .grtf trees deterministically.
-mapfile -t TREE_FILES < <(find "$TREES_DIR" -maxdepth 1 -name '*.grtf' | sort | head -2)
-SEED1="${TREE_FILES[0]}"
-SEED2="${TREE_FILES[1]}"
-
 OUTPUT_DIR="$BUILD_OUT/mutation_test_output"
 mkdir -p "$OUTPUT_DIR"
 
-echo "[test] seed 1: $(basename "$SEED1")"
-echo "[test] seed 2: $(basename "$SEED2")"
-echo "[test] output: $OUTPUT_DIR"
+echo "[test] trees dir:   $TREES_DIR"
+echo "[test] output dir:  $OUTPUT_DIR"
+echo "[test] basic iters: $BASIC_ITERS"
+echo "[test] compose:     $COMPOSE_TRIALS trials"
 echo ""
 
 # Hand mlir-opt path to the binary so it can parse-check outputs.
-MLIR_OPT_PATH="$LLVM_BUILD_PLAIN/bin/mlir-opt" \
-    "$TEST_BIN" "$SEED1" "$SEED2" 10 "$OUTPUT_DIR"
+export MLIR_OPT_PATH="$LLVM_BUILD_PLAIN/bin/mlir-opt"
+
+echo "[test] === Basic mutation test ==="
+"$TEST_BIN" "$TREES_DIR" "$BASIC_ITERS" "$OUTPUT_DIR/basic"
+
+echo ""
+echo "[test] === Composition stress test ==="
+"$TEST_BIN" "$TREES_DIR" "$COMPOSE_TRIALS" "$OUTPUT_DIR/compose" --compose
 
 echo ""
 echo "[test] mutation test complete"
-echo "[test] output files:"
-find "$OUTPUT_DIR" -maxdepth 1 -name '*.mlir' | head -10
+echo "[test] output files (basic):"
+find "$OUTPUT_DIR/basic" -maxdepth 1 -name '*.mlir' 2>/dev/null | head -10
+echo "[test] output files (compose):"
+find "$OUTPUT_DIR/compose" -maxdepth 1 -name '*.mlir' 2>/dev/null | head -10
 echo ""
 echo "============================================================"
 echo " Done. Review outputs in: $OUTPUT_DIR"
